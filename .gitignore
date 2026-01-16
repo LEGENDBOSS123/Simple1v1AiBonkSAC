@@ -1,0 +1,6 @@
+.vscode/
+node_modules/
+script.js
+models*.json
+models*.json.gz
+.DS_Store
