@@ -1,89 +1,106 @@
 import { CONFIG } from "./config.mjs";
 import { tf } from "./tf.mjs";
 
-/**
- * Computes Q-values from dueling network outputs: Q = V + (A - mean(A))
- */
-function computeQ(V, A) {
-    const advMean = A.mean(1, true);
-    return V.add(A.sub(advMean));
-}
 
-/**
- * Selects Q-values for taken actions using one-hot masking
- */
-function selectQForActions(Q, actionIndices) {
-    const oneHot = tf.oneHot(actionIndices, 2);
-    return Q.mul(oneHot).sum(1);
-}
-
-/**
- * Train the model using Double Dueling DQN with PER
- */
 export async function train(models, batch, importanceWeights = null) {
     if (batch.length < CONFIG.BATCH_SIZE) return null;
 
-    const { model, target: targetModel, optimizer } = models;
-    const numActions = CONFIG.ACTION_SIZE;
+    const { actor, critic1, critic2, targetCritic1, targetCritic2, optimizerActor, optimizerCritic1, optimizerCritic2 } = models;
     const gamma = CONFIG.DISCOUNT_FACTOR;
+    const entropyCoefficient = CONFIG.ENTROPY_COEFFICIENT;
+    const eps = 1e-8;
+    const clip = 0.01;
+    const temp = CONFIG.TEMP;
 
-    return tf.tidy(() => {
-        // Prepare batch tensors
-        const states = tf.tensor2d(batch.map(b => b.state));
-        const nextStates = tf.tensor2d(batch.map(b => b.nextState));
-        const actions = tf.tensor2d(batch.map(b => b.action));
-        const rewards = tf.tensor1d(batch.map(b => b.reward));
-        const dones = tf.tensor1d(batch.map(b => b.done ? 0 : 1));
-        const weights = importanceWeights
-            ? tf.tensor1d(importanceWeights)
-            : tf.ones([batch.length]);
+    const states = tf.tensor2d(batch.map(b => b.state));
+    const nextStates = tf.tensor2d(batch.map(b => b.nextState));
+    const actions = tf.tensor2d(batch.map(b => b.action));
+    const rewards = tf.tensor1d(batch.map(b => b.reward));
+    const notDones = tf.tensor1d(batch.map(b => b.done ? 0 : 1));
+    const weights = importanceWeights
+        ? tf.tensor1d(importanceWeights)
+        : tf.ones([batch.length]);
 
-        // Get network outputs for next states (Double DQN)
-        const [Vonline, ...Aonline] = model.predict(nextStates);
-        const [Vtarget, ...Atarget] = targetModel.predict(nextStates);
 
-        // Compute target Q-values for each action branch
-        const targets = [];
-        for (let i = 0; i < numActions; i++) {
-            const onlineQ = computeQ(Vonline, Aonline[i]);
-            const bestAction = onlineQ.argMax(1);
 
-            const targetQ = computeQ(Vtarget, Atarget[i]);
-            const selectedQ = selectQForActions(targetQ, bestAction);
 
-            // Bellman target: r + γ * Q_target * (1 - done)
-            targets.push(rewards.add(selectedQ.mul(dones).mul(gamma)));
-        }
+    const targetValues = tf.tidy(() => {
+        const nextProbs = actor.predict(nextStates).clipByValue(clip, 1 - clip);
 
-        // Get current Q-values for TD error calculation
-        const [Vcurr, ...Acurr] = model.predict(states);
-        let tdErrorMax = tf.zeros([batch.length]);
+        // sigmoid((log(p) - log(1-p) + log(u) - log(1-u)) / temp)
+        const logits = nextProbs.add(eps).log().sub(tf.scalar(1).sub(nextProbs).add(eps).log());
+        const u = tf.randomUniform(logits.shape);
+        const gumbel = u.add(eps).log().add(tf.scalar(1).sub(u).add(eps).log().neg());
+        const nextActions = logits.add(gumbel).div(temp).sigmoid();
+        const nextStateActions = tf.concat([nextStates, nextActions], 1);
+        const targetQ1 = targetCritic1.predict(nextStateActions).squeeze();
+        const targetQ2 = targetCritic2.predict(nextStateActions).squeeze();
+        const targetQ = tf.minimum(targetQ1, targetQ2);
 
-        for (let i = 0; i < numActions; i++) {
-            const actionIdx = actions.slice([0, i], [-1, 1]).squeeze([1]).toInt();
-            const currentQ = selectQForActions(computeQ(Vcurr, Acurr[i]), actionIdx);
-            const branchTdError = targets[i].sub(currentQ).abs();
-            tdErrorMax = tf.maximum(tdErrorMax, branchTdError);
-        }
-        const tdErrors = tdErrorMax;
+        // -sum(p*log(p) + (1-p)*log(1-p))
+        const term1 = nextProbs.add(eps).log().mul(nextActions);
+        const term2 = tf.scalar(1).sub(nextProbs).add(eps).log().mul(tf.scalar(1).sub(nextActions));
+        const logProb = term1.add(term2).sum(1);
 
-        const loss = optimizer.minimize(() => {
-            const [V, ...As] = model.apply(states, { training: true });
-            let totalLoss = tf.zeros([batch.length]);
-
-            for (let i = 0; i < numActions; i++) {
-                const actionIdx = actions.slice([0, i], [-1, 1]).squeeze([1]).toInt();
-                const predictedQ = selectQForActions(computeQ(V, As[i]), actionIdx);
-                const branchLoss = tf.losses.huberLoss(targets[i], predictedQ, undefined, undefined, tf.Reduction.NONE);
-                totalLoss = totalLoss.add(branchLoss);
-            }
-            // Average across branches, then apply importance weights, then take mean
-            return totalLoss.div(numActions).mul(weights).mean();
-        }, true);
-
-        return {
-            loss: loss.dataSync()[0],
-            tdErrors: Array.from(tdErrors.dataSync())
-        };
+        // r + gamma * (1 - done) * (Q_target - alpha * H)
+        return rewards.add(notDones.mul(gamma).mul(targetQ.sub(logProb.mul(entropyCoefficient))));
     });
+
+    const stateActions = tf.concat([states, actions], 1);
+    let criticLoss1, criticLoss2, tdErrors, actorLoss;
+
+
+    criticLoss1 = optimizerCritic1.minimize(() => {
+        const q1 = critic1.predict(stateActions).squeeze();
+        const td1 = targetValues.sub(q1);
+        tdErrors = tf.keep(td1.abs());
+        return tf.losses.huberLoss(targetValues, q1, weights, 1, tf.Reduction.MEAN);
+    }, true);
+
+
+    criticLoss2 = optimizerCritic2.minimize(() => {
+        const q2 = critic2.predict(stateActions).squeeze();
+        return tf.losses.huberLoss(targetValues, q2, weights, 1, tf.Reduction.MEAN);
+    }, true);
+
+    actorLoss = optimizerActor.minimize(() => {
+        const probs = actor.predict(states).clipByValue(clip, 1 - clip);
+
+
+        // sigmoid((log(p) - log(1-p) + log(u) - log(1-u)) / temp)
+        const logits = probs.add(eps).log().sub(tf.scalar(1).sub(probs).add(eps).log());
+        const u = tf.randomUniform(logits.shape);
+        const gumbel = u.add(eps).log().add(tf.scalar(1).sub(u).add(eps).log().neg());
+
+        const expectedActions = logits.add(gumbel).div(temp).sigmoid();
+        const stateActions = tf.concat([states, expectedActions], 1);
+
+        const q1 = critic1.predict(stateActions).squeeze();
+        const q2 = critic2.predict(stateActions).squeeze();
+        const q = tf.minimum(q1, q2);
+
+        // H = -sum(p*log(p) + (1-p)*log(1-p))
+        const term1 = probs.add(eps).log().mul(expectedActions);
+        const term2 = tf.scalar(1).sub(probs).add(eps).log().mul(tf.scalar(1).sub(expectedActions));
+        const logProb = term1.add(term2).sum(1);
+
+        // Actor loss: minimize -Q + alpha * (-H) = maximize Q + alpha * H
+        const loss = logProb.mul(entropyCoefficient).sub(q).mean();
+        return loss;
+    }, true);
+
+    tf.dispose(
+        [states, nextStates, actions, rewards, notDones, weights,
+            targetValues, stateActions]
+    );
+
+    const losses = {
+        lossActor: actorLoss.dataSync()[0],
+        lossCritic1: criticLoss1.dataSync()[0],
+        lossCritic2: criticLoss2.dataSync()[0],
+        tdErrors: tdErrors.arraySync()
+    };
+    tf.dispose([tdErrors, actorLoss, criticLoss1, criticLoss2]);
+
+    return losses;
 }

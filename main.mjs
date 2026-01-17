@@ -1,6 +1,6 @@
 import { CONFIG, updateConfig } from "./config.mjs";
 import { log } from "./log.mjs";
-import { actionToArray, arrayToAction, getAction, move, predictActionArray, predictActionArrayRaw, randomAction } from "./move.mjs";
+import { actionToArray, arrayToAction, move, predictActionArray } from "./move.mjs";
 import { Random } from "./Random.mjs";
 import { ReplayBuffer } from "./ReplayBuffer.mjs";
 import { setupLobby } from "./setupLobby.mjs";
@@ -15,7 +15,6 @@ let currentModel = null;
 let memory = new ReplayBuffer(CONFIG.REPLAY_BUFFER_SIZE);
 
 let losses = [];
-let trainSteps = 0;
 
 top.models = function () { return models; };
 top.currentModel = function () { return currentModel; };
@@ -38,7 +37,8 @@ async function setup() {
         currentModel = setupModel();
     }
     log("TensorFlow.js version:", tf.version.tfjs);
-    log(`model initialized with ${currentModel.model.countParams()} parameters.`);
+    log(`Actor Model initialized with ${currentModel.actor.countParams()} parameters.`);
+    log(`Critic Model initialized with ${currentModel.critic1.countParams()} parameters.`);
 }
 
 
@@ -59,26 +59,32 @@ async function main() {
                 // Anneal beta from PER_BETA_START to PER_BETA_END over PER_BETA_FRAMES
                 const beta = Math.min(
                     CONFIG.PER_BETA_END,
-                    CONFIG.PER_BETA_START + (CONFIG.PER_BETA_END - CONFIG.PER_BETA_START) * (trainSteps / CONFIG.PER_BETA_FRAMES)
+                    CONFIG.PER_BETA_START + (CONFIG.PER_BETA_END - CONFIG.PER_BETA_START) * (CONFIG.trainSteps / CONFIG.PER_BETA_FRAMES)
                 );
-                for (let i = 0; i < CONFIG.TRAIN_COUNT; i++) {
+                CONFIG.TEMP = Math.max(
+                    CONFIG.TEMP_END,
+                    CONFIG.TEMP_START - (CONFIG.TEMP_START - CONFIG.TEMP_END) * (CONFIG.trainSteps / CONFIG.TEMP_ANNEAL_FRAMES)
+                );
+                for (let i = 0; i < CONFIG.TRAIN_FREQ; i++) {
                     const { batch, indices, importanceWeights } = memory.sample(CONFIG.BATCH_SIZE, CONFIG.PER_ALPHA, beta);
                     const result = await train(currentModel, batch, importanceWeights);
                     if (result) {
-                        losses.push(result.loss);
-                        log(`Loss: ${result.loss.toFixed(4)}`);
-                        trainSteps++;
+                        losses.push(result.lossActor);
+                        log(`Loss: ${result.lossActor.toFixed(4)}`);
+                        log(`Critic1 Loss: ${result.lossCritic1.toFixed(4)}`);
+                        log(`Critic2 Loss: ${result.lossCritic2.toFixed(4)}`);
+                        CONFIG.trainSteps ++;
 
-                        // Update target network periodically
-                        if (trainSteps % CONFIG.TARGET_UPDATE_FREQ === 0) {
-                            currentModel.target.setWeights(currentModel.model.getWeights());
+                        if (CONFIG.trainSteps % (CONFIG.TARGET_UPDATE_FREQ * CONFIG.TRAIN_FREQ) === 0) {
+                            currentModel.targetCritic1.setWeights(currentModel.critic1.getWeights());
+                            currentModel.targetCritic2.setWeights(currentModel.critic2.getWeights());
                             log("Target network updated.");
                         }
                     }
                     memory.updatePriorities(indices, result.tdErrors);
                 }
                 // Save model checkpoint after training batch
-                if (trainSteps % CONFIG.SAVE_AFTER_EPISODES === 0 && trainSteps > 0) {
+                if (CONFIG.trainSteps % CONFIG.SAVE_AFTER_EPISODES === 0 && CONFIG.trainSteps > 0) {
                     models.push(cloneModel(currentModel));
                     if (models.length > 10) {
                         models.shift();
@@ -118,6 +124,10 @@ async function main() {
                 let rewardP1 = rewardCurrentFrame.p1;
                 let rewardP2 = rewardCurrentFrame.p2;
 
+                if (safeFrames > 300) {
+                    newState.done = true;
+                }
+
                 if (lastActionP1 !== null) {
                     memory.add(lastState.toArray(),
                         lastActionP1,
@@ -136,30 +146,24 @@ async function main() {
                     );
                 }
 
-                if (safeFrames > 300 || newState.done) {
+                if (newState.done) {
                     break;
                 }
 
-                let probs = predictActionArray(currentModel.model, newState.toArray());
+                let probs = predictActionArray(currentModel.actor, newState.toArray());
+                top.probs = probs;
                 let ataP1 = arrayToAction(probs);
-                if (Math.random() < CONFIG.EPSILON) {
-                    ataP1 = randomAction();
-                }
                 move(CONFIG.PLAYER_ONE_ID, ataP1);
                 lastActionP1 = actionToArray(ataP1);
 
 
-                let probs2 = predictActionArray(p2Model.model, newState.flip().toArray());
+                let probs2 = predictActionArray(p2Model.actor, newState.flip().toArray());
                 let ataP2 = arrayToAction(probs2);
-                if (Math.random() < CONFIG.EPSILON) {
-                    ataP2 = randomAction();
-                }
                 move(CONFIG.PLAYER_TWO_ID, ataP2);
                 lastActionP2 = actionToArray(ataP2);
 
                 safeFrames++;
                 lastState = newState;
-                CONFIG.EPSILON = Math.max(CONFIG.MIN_EPSILON, CONFIG.EPSILON - CONFIG.EPSILON_DECAY);
 
                 // 20 FPS
                 await Time.sleep(50);

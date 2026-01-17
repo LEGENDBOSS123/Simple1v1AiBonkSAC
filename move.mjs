@@ -24,12 +24,12 @@ export function actionToArray(action) {
 
 export function arrayToAction(arr) {
     return {
-        left: arr[0] === 1,
-        right: arr[1] === 1,
-        up: arr[2] === 1,
-        down: arr[3] === 1,
-        heavy: arr[4] === 1,
-        special: arr[5] === 1
+        left: sampleBernoulli(arr[0]) === 1,
+        right: sampleBernoulli(arr[1]) === 1,
+        up: sampleBernoulli(arr[2]) === 1,
+        down: sampleBernoulli(arr[3]) === 1,
+        heavy: sampleBernoulli(arr[4]) === 1,
+        special: sampleBernoulli(arr[5]) === 1
     }
 }
 
@@ -47,24 +47,8 @@ export function randomAction(p = 0.5) {
 export function predictActionArray(model, state) {
     return tf.tidy(() => {
         const stateTensor = tf.tensor2d([state]);
-        const [V, ...advantages] = model.predict(stateTensor);
-        const action = advantages.map(A => {
-            const advMean = A.mean(1, true);
-            const centeredAdv = A.sub(advMean);
-            const Q = V.add(centeredAdv);
-            return Q.argMax(1).dataSync()[0];
-        });
-        return action;
-    });
-}
-
-export function predictActionArrayRaw(model, state) {
-    return tf.tidy(() => {
-        const stateTensor = tf.tensor2d([state]);
-        const [V, ...advantages] = model.predict(stateTensor);
-        const action = advantages.map(A => {
-            return A.dataSync();
-        });
+        const prediction = model.predict(stateTensor);
+        const action = prediction.arraySync()[0];
         return action;
     });
 }

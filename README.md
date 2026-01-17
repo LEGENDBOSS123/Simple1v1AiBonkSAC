@@ -1,7 +1,7 @@
 ### Simple 1v1 Bonk.io AI 
 This is a project to train AI to learn how to play simple 1v1 with itself.
 Could use same code to train AI on other maps.
-Uses the DDQN algorithm
+Uses the SAC algorithm
 
 ### RUN
 To install dependencies, run `npm install`
@@ -19,4 +19,4 @@ My `Bonk Commands` Mod is required to get player positions and velocities.
 [Bonk Commands](https://greasyfork.org/en/scripts/451341-bonk-commands)
 
 
-https://github.com/LEGENDBOSS123/Simple1v1AiBonkDQN
+https://github.com/LEGENDBOSS123/Simple1v1AiBonkSAC
