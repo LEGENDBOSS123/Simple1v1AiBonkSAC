@@ -6,7 +6,7 @@ export async function setupLobby() {
     if (top.settedUpLobby) {
         return;
     }
-    top.changemode("sp");
+    top.changemode("b");
     top.commandhandle("/sandbox");
     top.commandhandle("/addname Side Character");
     top.commandhandle("/addname Main Character");

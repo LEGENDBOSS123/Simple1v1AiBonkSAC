@@ -18,19 +18,27 @@ export function actionToArray(action) {
         action.up ? 1 : 0,
         action.down ? 1 : 0,
         action.heavy ? 1 : 0,
-        action.special ? 1 : 0,
+        // action.special ? 1 : 0,
     ];
 }
 
 export function arrayToAction(arr) {
+    // return {
+    //     left: sampleBernoulli(arr[0]) === 1,
+    //     right: sampleBernoulli(arr[1]) === 1,
+    //     up: sampleBernoulli(arr[2]) === 1,
+    //     down: sampleBernoulli(arr[3]) === 1,
+    //     heavy: sampleBernoulli(arr[4]) === 1,
+    //     special: false//sampleBernoulli(arr[5]) === 1
+    // }
     return {
-        left: sampleBernoulli(arr[0]) === 1,
-        right: sampleBernoulli(arr[1]) === 1,
-        up: sampleBernoulli(arr[2]) === 1,
-        down: sampleBernoulli(arr[3]) === 1,
-        heavy: sampleBernoulli(arr[4]) === 1,
-        special: sampleBernoulli(arr[5]) === 1
-    }
+        left: arr[0] > 0,
+        right: arr[1] > 0,
+        up: arr[2] > 0,
+        down: arr[3] > 0,
+        heavy: arr[4] > 0,
+        special: false//arr[5] > 0
+    };
 }
 
 export function randomAction(p = 0.5) {
@@ -40,16 +48,20 @@ export function randomAction(p = 0.5) {
         up: Math.random() < p,
         down: Math.random() < p,
         heavy: Math.random() < p,
-        special: Math.random() < p
+        special: false//Math.random() < p
     };
 }
 
 export function predictActionArray(model, state) {
     return tf.tidy(() => {
         const stateTensor = tf.tensor2d([state]);
-        const prediction = model.predict(stateTensor);
-        const action = prediction.arraySync()[0];
-        return action;
+        const [mu, logStd] = model.predict(stateTensor);
+        const logStdClamped = tf.clipByValue(logStd, -20, 2);
+        const std = tf.exp(logStdClamped);
+        const noise = tf.randomNormal(mu.shape);
+        const continuousAction = tf.tanh(mu.add(std.mul(noise)));
+        const rawAction = continuousAction.arraySync()[0];
+        return rawAction;
     });
 }
 

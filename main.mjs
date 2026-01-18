@@ -1,6 +1,6 @@
 import { CONFIG, updateConfig } from "./config.mjs";
 import { log } from "./log.mjs";
-import { actionToArray, arrayToAction, move, predictActionArray } from "./move.mjs";
+import { actionToArray, arrayToAction, move, predictActionArray, randomAction } from "./move.mjs";
 import { Random } from "./Random.mjs";
 import { ReplayBuffer } from "./ReplayBuffer.mjs";
 import { setupLobby } from "./setupLobby.mjs";
@@ -41,6 +41,19 @@ async function setup() {
     log(`Critic Model initialized with ${currentModel.critic1.countParams()} parameters.`);
 }
 
+function softUpdate(source, target, tau) {
+    tf.tidy(() => {
+        const sourceWeights = source.getWeights();
+        const targetWeights = target.getWeights();
+
+        const newWeights = sourceWeights.map((sourceW, i) => {
+            const targetW = targetWeights[i];
+            return sourceW.mul(tau).add(targetW.mul(1 - tau));
+        });
+
+        target.setWeights(newWeights);
+    });
+}
 
 async function main() {
 
@@ -51,42 +64,47 @@ async function main() {
 
     async function gameLoop() {
 
+        let p2Model = currentModel;
         while (true) {
-
-
             if (memory.size() >= CONFIG.BATCH_SIZE) {
                 log("Training...");
-                // Anneal beta from PER_BETA_START to PER_BETA_END over PER_BETA_FRAMES
+
                 const beta = Math.min(
                     CONFIG.PER_BETA_END,
                     CONFIG.PER_BETA_START + (CONFIG.PER_BETA_END - CONFIG.PER_BETA_START) * (CONFIG.trainSteps / CONFIG.PER_BETA_FRAMES)
                 );
-                CONFIG.TEMP = Math.max(
-                    CONFIG.TEMP_END,
-                    CONFIG.TEMP_START - (CONFIG.TEMP_START - CONFIG.TEMP_END) * (CONFIG.trainSteps / CONFIG.TEMP_ANNEAL_FRAMES)
-                );
+
+                CONFIG.trainSteps++;
                 for (let i = 0; i < CONFIG.TRAIN_FREQ; i++) {
-                    const { batch, indices, importanceWeights } = memory.sample(CONFIG.BATCH_SIZE, CONFIG.PER_ALPHA, beta);
+                    // const { batch, indices, importanceWeights } = memory.sample(CONFIG.BATCH_SIZE, CONFIG.PER_ALPHA, beta);
+                    const perBatchSize = Math.floor(CONFIG.BATCH_SIZE * 0.6);
+                    const uniformBatchSize = CONFIG.BATCH_SIZE - perBatchSize;
+
+                    const { batch: perBatch, indices: perIndices, importanceWeights: perWeights } = memory.sample(perBatchSize, CONFIG.PER_ALPHA, beta);
+                    const { batch: uniBatch, indices: uniIndices, importanceWeights: uniWeights } = memory.sample(uniformBatchSize, 0, beta); // alpha=0 = uniform
+
+                    const batch = perBatch.concat(uniBatch);
+                    const indices = perIndices.concat(uniIndices);
+                    const importanceWeights = perWeights.concat(uniWeights);
+
                     const result = await train(currentModel, batch, importanceWeights);
                     if (result) {
                         losses.push(result.lossActor);
                         log(`Loss: ${result.lossActor.toFixed(4)}`);
                         log(`Critic1 Loss: ${result.lossCritic1.toFixed(4)}`);
                         log(`Critic2 Loss: ${result.lossCritic2.toFixed(4)}`);
-                        CONFIG.trainSteps ++;
-
-                        if (CONFIG.trainSteps % (CONFIG.TARGET_UPDATE_FREQ * CONFIG.TRAIN_FREQ) === 0) {
-                            currentModel.targetCritic1.setWeights(currentModel.critic1.getWeights());
-                            currentModel.targetCritic2.setWeights(currentModel.critic2.getWeights());
-                            log("Target network updated.");
-                        }
+                        log(`Alpha Value: ${result.alphaValue.toFixed(4)}`);
                     }
                     memory.updatePriorities(indices, result.tdErrors);
                 }
+
+                softUpdate(currentModel.critic1, currentModel.targetCritic1, CONFIG.TAU);
+                softUpdate(currentModel.critic2, currentModel.targetCritic2, CONFIG.TAU);
+
                 // Save model checkpoint after training batch
                 if (CONFIG.trainSteps % CONFIG.SAVE_AFTER_EPISODES === 0 && CONFIG.trainSteps > 0) {
                     models.push(cloneModel(currentModel));
-                    if (models.length > 10) {
+                    if (models.length > 5) {
                         models.shift();
                     }
                     log(`Model checkpoint saved. Total checkpoints: ${models.length}`);
@@ -108,9 +126,13 @@ async function main() {
 
             let safeFrames = 0;
 
-            let p2Model = currentModel;
-            if (Math.random() < 0.5 && models.length > 1) {
-                p2Model = Random.choose(models);
+
+            if (models.length > 0) {
+                if (CONFIG.trainSteps % 50 < 25) {
+                    p2Model = models[models.length - 1];
+                } else {
+                    p2Model = Random.choose(models);
+                }
             }
 
             let lastActionP1 = null;
@@ -154,13 +176,17 @@ async function main() {
                 top.probs = probs;
                 let ataP1 = arrayToAction(probs);
                 move(CONFIG.PLAYER_ONE_ID, ataP1);
-                lastActionP1 = actionToArray(ataP1);
+                lastActionP1 = probs;
 
 
                 let probs2 = predictActionArray(p2Model.actor, newState.flip().toArray());
                 let ataP2 = arrayToAction(probs2);
+                if (CONFIG.trainSteps < CONFIG.WARM_UP_EPISODES) {
+                    ataP2 = randomAction(0);
+                    probs2 = actionToArray(ataP2);
+                }
                 move(CONFIG.PLAYER_TWO_ID, ataP2);
-                lastActionP2 = actionToArray(ataP2);
+                lastActionP2 = probs2;
 
                 safeFrames++;
                 lastState = newState;

@@ -3,24 +3,31 @@ import { tf } from "./tf.mjs";
 
 
 function setupSACActor() {
-    let model = tf.sequential();
-    model.add(tf.layers.inputLayer({ inputShape: [CONFIG.GAME_STATE_SIZE], name: 'actor_input' }));
+    const input = tf.input({ shape: [CONFIG.GAME_STATE_SIZE], name: 'actor_input' });
+
+    let x = input;
     let i = 0;
+
     for (const layerLength of CONFIG.ACTOR_LAYER_LENGTHS) {
-        model.add(tf.layers.dense({
+        x = tf.layers.dense({
             units: layerLength,
             activation: 'relu',
             kernelInitializer: 'heNormal',
             name: `actor_dense_${i++}`
-        }));
+        }).apply(x);
     }
-    model.add(tf.layers.dense({
+    const mu = tf.layers.dense({
         units: CONFIG.ACTION_SIZE,
-        activation: 'sigmoid',
-        kernelInitializer: 'glorotUniform',
-        name: 'actor_output'
-    }));
-    return model;
+        activation: 'linear',
+        name: 'actor_mean'
+    }).apply(x);
+    const logStd = tf.layers.dense({
+        units: CONFIG.ACTION_SIZE,
+        activation: 'linear',
+        name: 'actor_log_std'
+    }).apply(x);
+
+    return tf.model({ inputs: input, outputs: [mu, logStd] });
 }
 
 function setupSACCritic() {
@@ -52,6 +59,8 @@ export function setupModel() {
     const targetCritic2 = setupSACCritic();
     targetCritic1.setWeights(critic1.getWeights());
     targetCritic2.setWeights(critic2.getWeights());
+    const logAlpha = tf.variable(tf.scalar(0), true);
+    const optimizerAlpha = tf.train.adam(CONFIG.LEARNING_RATE_ACTOR);
     const optimizerActor = tf.train.adam(CONFIG.LEARNING_RATE_ACTOR);
     const optimizerCritic1 = tf.train.adam(CONFIG.LEARNING_RATE_CRITIC);
     const optimizerCritic2 = tf.train.adam(CONFIG.LEARNING_RATE_CRITIC);
@@ -63,7 +72,9 @@ export function setupModel() {
         targetCritic2,
         optimizerActor,
         optimizerCritic1,
-        optimizerCritic2
+        optimizerCritic2,
+        logAlpha,
+        optimizerAlpha
     };
 }
 
@@ -75,6 +86,7 @@ export function cloneModel(model) {
     newModel.critic2.setWeights(model.critic2.getWeights());
     newModel.targetCritic1.setWeights(model.targetCritic1.getWeights());
     newModel.targetCritic2.setWeights(model.targetCritic2.getWeights());
+    newModel.logAlpha.assign(model.logAlpha);
     return newModel;
 }
 
@@ -106,7 +118,8 @@ export async function serializeModels(models, currentModel) {
             critic1: artifactsCritic1,
             critic2: artifactsCritic2,
             targetCritic1: artifactsTargetCritic1,
-            targetCritic2: artifactsTargetCritic2
+            targetCritic2: artifactsTargetCritic2,
+            logAlpha: Array.from(model.logAlpha.dataSync())
         };
         serializedModels.push(artifacts);
     }
@@ -131,7 +144,9 @@ export async function loadModelFromArtifacts(artifacts) {
     model.critic2.loadWeights(tf.io.decodeWeights(new Float32Array(artifacts.critic2.weightData).buffer, artifacts.critic2.weightSpecs));
     model.targetCritic1.loadWeights(tf.io.decodeWeights(new Float32Array(artifacts.targetCritic1.weightData).buffer, artifacts.targetCritic1.weightSpecs));
     model.targetCritic2.loadWeights(tf.io.decodeWeights(new Float32Array(artifacts.targetCritic2.weightData).buffer, artifacts.targetCritic2.weightSpecs));
-    console.log(model);
+    console.log(artifacts.logAlpha);
+    model.logAlpha.assign(tf.tensor(artifacts.logAlpha[0]));
+
     return model;
 }
 

@@ -1,36 +1,37 @@
 export const CONFIG = {
-    ACTOR_LAYER_LENGTHS: [256, 256],
-    CRITIC_LAYER_LENGTHS: [256, 256],
-    GAME_STATE_SIZE: 28,
-    ACTION_SIZE: 6,
+    ACTOR_LAYER_LENGTHS: [256, 128],
+    CRITIC_LAYER_LENGTHS: [512, 256],
+    GAME_STATE_SIZE: 24,
+    ACTION_SIZE: 5,
 
     LEARNING_RATE_ACTOR: 0.0001,
     LEARNING_RATE_CRITIC: 0.0003,
-    
-    SAVE_AFTER_EPISODES: 300,
-    BATCH_SIZE: 256,
-    DISCOUNT_FACTOR: 0.99,
-    REPLAY_BUFFER_SIZE: 500_000,
 
-    TARGET_UPDATE_FREQ: 20,
-    TRAIN_FREQ: 50,
+    WARM_UP_EPISODES: 40,
+    SAVE_AFTER_EPISODES: 500,
+    BATCH_SIZE: 512,
+    DISCOUNT_FACTOR: 0.98,
+    REPLAY_BUFFER_SIZE: 200_000,
 
-    // Prioritized Experience Replay parameters
-    PER_ALPHA: 0.6,       // Priority exponent (0 = uniform, 1 = full prioritization)
-    PER_BETA_START: 0.4,  // Initial importance sampling exponent
-    PER_BETA_END: 1.0,    // Final importance sampling exponent
-    PER_BETA_FRAMES: 100_000, // Number of frames to anneal beta
-    TEMP_START: 0.5,
-    TEMP: 0.5,
-    TEMP_END: 0.1,
-    TEMP_ANNEAL_FRAMES: 100_000,
+    TAU: 0.25,
+    TRAIN_FREQ: 30,
 
-    ENTROPY_COEFFICIENT: 0.3,
+    PER_ALPHA: 0.6,
+    PER_BETA_START: 0.4,
+    PER_BETA_END: 1.0,
+    PER_BETA_FRAMES: 10_000,
+
+    TARGET_ENTROPY: -5,
+
+    GRADIENT_CLIP: 1,
+    ACTOR_UPDATE_DELAY: 1,
+
+    REWARD_SCALE: 10,
 
     PLAYER_ONE_ID: 200,
     PLAYER_TWO_ID: 201,
     POSITION_NORMALIZATION: 1 / 500,
-    VELOCITY_NORMALIZATION: 1.5,
+    VELOCITY_NORMALIZATION: 2,
 
     // runtime params
     trainSteps: 0
